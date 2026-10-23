@@ -7,6 +7,8 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
   #msg { position: fixed; left: 0; right: 0; top: 14px; text-align: center; color: #fff; font-size: 16px; pointer-events: none; padding: 0 16px; text-shadow: 0 1px 3px #000; }
+  #VRButton { font-size: 28px !important; padding: 22px 40px !important; width: auto !important; left: 50% !important; transform: translateX(-50%); bottom: 60px !important; border: 3px solid #fff !important; background: rgba(0,0,0,0.6) !important; opacity: 1 !important; }
+  #diag { position: fixed; left: 0; right: 0; bottom: 8px; text-align: center; color: #ff0; font-size: 18px; pointer-events: none; text-shadow: 0 1px 3px #000; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -17,6 +19,7 @@
 </head>
 <body>
 <div id="msg">Loading your garden...</div>
+<div id="diag">Checking VR...</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -36,6 +39,13 @@ const LANTERNS = [[0.350,0.395],[0.404,0.385],[0.4175,0.51],[0.5075,0.45],[0.524
 
 const HFOV = 75, CUT = 0.25;
 const msg = document.getElementById('msg');
+(async () => {
+  const d = document.getElementById('diag');
+  const secure = window.isSecureContext, hasXR = 'xr' in navigator;
+  let vr = 'no';
+  try { if (hasXR) vr = (await navigator.xr.isSessionSupported('immersive-vr')) ? 'yes' : 'no'; } catch (e) { vr = 'error: ' + e.message; }
+  d.textContent = 'Secure link: ' + (secure ? 'yes' : 'NO') + '  |  WebXR: ' + (hasXR ? 'yes' : 'NO') + '  |  VR mode: ' + vr;
+})();
 
 function loadImage(names) {
   return new Promise((resolve, reject) => {
