@@ -54,8 +54,8 @@ try {
   const aspect = photo.naturalWidth / photo.naturalHeight;
   const is360 = aspect > 1.9 && aspect < 2.1;
 
-  const cols = is360 ? 256 : 320;
-  const rows = is360 ? 128 : Math.max(2, Math.min(400, Math.round(320 / aspect)));
+  const cols = is360 ? 512 : 320;
+  const rows = is360 ? 256 : Math.max(2, Math.min(400, Math.round(320 / aspect)));
 
   const c = document.createElement('canvas');
   c.width = cols + 1; c.height = rows + 1;
@@ -65,6 +65,8 @@ try {
   const depthAt = (ix, iy) => px[(iy * (cols + 1) + ix) * 4] / 255;
 
   const positions = [], uvs = [], indices = [], dvals = [];
+  const backPositions = [], backIndices = [];
+  const BACK = FAR * 1.3;
   const t = Math.tan(THREE.MathUtils.degToRad(HFOV / 2));
   for (let iy = 0; iy <= rows; iy++) {
     for (let ix = 0; ix <= cols; ix++) {
@@ -80,6 +82,7 @@ try {
         dir = new THREE.Vector3((u - 0.5) * 2 * t, (0.5 - v) * 2 * t / aspect, -1).normalize();
       }
       positions.push(dir.x * r, dir.y * r + 1.6, dir.z * r);
+      backPositions.push(dir.x * BACK, dir.y * BACK + 1.6, dir.z * BACK);
       uvs.push(u, 1 - v);
       dvals.push(d);
     }
@@ -87,6 +90,7 @@ try {
   for (let iy = 0; iy < rows; iy++) {
     for (let ix = 0; ix < cols; ix++) {
       const a = iy * (cols + 1) + ix, b = a + 1, c2 = a + cols + 1, d2 = c2 + 1;
+      backIndices.push(a, c2, b, b, c2, d2);
       const mx = Math.max(dvals[a], dvals[b], dvals[c2], dvals[d2]);
       const mn = Math.min(dvals[a], dvals[b], dvals[c2], dvals[d2]);
       if (mx - mn > CUT) continue;
@@ -107,6 +111,13 @@ try {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
   scene.add(mesh);
+
+  // Backdrop: same image far behind, so holes show picture instead of black
+  const backGeo = new THREE.BufferGeometry();
+  backGeo.setAttribute('position', new THREE.Float32BufferAttribute(backPositions, 3));
+  backGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  backGeo.setIndex(backIndices);
+  scene.add(new THREE.Mesh(backGeo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })));
 
   const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 100);
   camera.position.set(0, 1.6, 0);
