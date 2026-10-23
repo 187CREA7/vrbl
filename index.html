@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walk Inside Photo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  #msg { position: fixed; left: 0; right: 0; top: 14px; text-align: center; color: #fff; font-size: 16px; pointer-events: none; padding: 0 16px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="msg">Loading your photo...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+const NEAR = 1.0;
+const FAR = 6.0;
+const HFOV = 75;
+const CUT = 0.25;
+const MOVE_SPEED = 1.5;
+const TURN_SPEED = 1.5;
+
+const msg = document.getElementById('msg');
+
+function loadImage(names) {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const tryNext = () => {
+      if (i >= names.length) { reject(new Error('Could not find file: ' + names[0])); return; }
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => { i++; tryNext(); };
+      img.src = names[i];
+    };
+    tryNext();
+  });
+}
+
+try {
+  const [photo, depthImg] = await Promise.all([
+    loadImage(['photo.jpg', 'photo.jpeg', 'photo.png', 'photo.webp']),
+    loadImage(['depth.png', 'depth.jpg'])
+  ]);
+
+  const aspect = photo.naturalWidth / photo.naturalHeight;
+  const is360 = aspect > 1.9 && aspect < 2.1;
+
+  const cols = is360 ? 256 : 320;
+  const rows = is360 ? 128 : Math.max(2, Math.min(400, Math.round(320 / aspect)));
+
+  const c = document.createElement('canvas');
+  c.width = cols + 1; c.height = rows + 1;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(depthImg, 0, 0, cols + 1, rows + 1);
+  const px = ctx.getImageData(0, 0, cols + 1, rows + 1).data;
+  const depthAt = (ix, iy) => px[(iy * (cols + 1) + ix) * 4] / 255;
+
+  const positions = [], uvs = [], indices = [], dvals = [];
+  const t = Math.tan(THREE.MathUtils.degToRad(HFOV / 2));
+  for (let iy = 0; iy <= rows; iy++) {
+    for (let ix = 0; ix <= cols; ix++) {
+      const u = ix / cols, v = iy / rows;
+      const d = depthAt(ix, iy);
+      const r = FAR - d * (FAR - NEAR);
+      let dir;
+      if (is360) {
+        const lon = (u - 0.5) * Math.PI * 2;
+        const lat = (0.5 - v) * Math.PI;
+        dir = new THREE.Vector3(Math.sin(lon) * Math.cos(lat), Math.sin(lat), -Math.cos(lon) * Math.cos(lat));
+      } else {
+        dir = new THREE.Vector3((u - 0.5) * 2 * t, (0.5 - v) * 2 * t / aspect, -1).normalize();
+      }
+      positions.push(dir.x * r, dir.y * r + 1.6, dir.z * r);
+      uvs.push(u, 1 - v);
+      dvals.push(d);
+    }
+  }
+  for (let iy = 0; iy < rows; iy++) {
+    for (let ix = 0; ix < cols; ix++) {
+      const a = iy * (cols + 1) + ix, b = a + 1, c2 = a + cols + 1, d2 = c2 + 1;
+      const mx = Math.max(dvals[a], dvals[b], dvals[c2], dvals[d2]);
+      const mn = Math.min(dvals[a], dvals[b], dvals[c2], dvals[d2]);
+      if (mx - mn > CUT) continue;
+      indices.push(a, c2, b, b, c2, d2);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+
+  const tex = new THREE.Texture(photo);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  scene.add(mesh);
+
+  const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 100);
+  camera.position.set(0, 1.6, 0);
+  camera.rotation.order = 'YXZ';
+  const rig = new THREE.Group();
+  rig.add(camera);
+  scene.add(rig);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType('local-floor');
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (e.buttons && !renderer.xr.isPresenting) {
+      camera.rotation.y -= e.movementX * 0.005;
+      camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - e.movementY * 0.005));
+    }
+  });
+
+  const clock = new THREE.Clock();
+  const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+  renderer.setAnimationLoop(() => {
+    const dt = clock.getDelta();
+    const session = renderer.xr.getSession();
+    if (session) {
+      for (const src of session.inputSources) {
+        const gp = src.gamepad;
+        if (!gp) continue;
+        const x = gp.axes[2] || 0, y = gp.axes[3] || 0;
+        if (src.handedness === 'left' && (Math.abs(x) > 0.15 || Math.abs(y) > 0.15)) {
+          renderer.xr.getCamera().getWorldDirection(fwd);
+          fwd.y = 0; fwd.normalize();
+          right.crossVectors(fwd, up);
+          rig.position.addScaledVector(fwd, -y * MOVE_SPEED * dt);
+          rig.position.addScaledVector(right, x * MOVE_SPEED * dt);
+        } else if (src.handedness === 'right' && Math.abs(x) > 0.15) {
+          rig.rotation.y -= x * TURN_SPEED * dt;
+        }
+      }
+    }
+    renderer.render(scene, camera);
+  });
+
+  msg.textContent = is360
+    ? '360 photo loaded. Tap "ENTER VR" at the bottom.'
+    : 'Photo loaded. Tap "ENTER VR" at the bottom.';
+  setTimeout(() => { msg.style.display = 'none'; }, 6000);
+
+} catch (err) {
+  msg.textContent = 'Problem: ' + err.message + '. Check that photo.jpg and depth.png are in the same folder as this file.';
+}
+</script>
+</body>
+</html>
