@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garden Portal</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  #msg { position: fixed; left: 0; right: 0; top: 14px; text-align: center; color: #fff; font-size: 16px; pointer-events: none; padding: 0 16px; text-shadow: 0 1px 3px #000; }
+  #VRButton { font-size: 28px !important; padding: 22px 40px !important; width: auto !important; left: 50% !important; transform: translateX(-50%); bottom: 40px !important; border: 3px solid #fff !important; background: rgba(0,0,0,0.6) !important; opacity: 1 !important; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="msg">Loading your worlds...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ===== EASY SETTINGS =====
+const WORLDS = [
+  { photo: 'photo.png',  depth: 'depth.png',  outside: true,  portal: [0.36, 0.56], label: 'Naar binnen' },
+  { photo: 'photo2.png', depth: 'depth2.png', outside: false, portal: [0.21, 0.48], label: 'Naar de tuin' }
+];
+// portal: where the door is in the picture (0..1 from left, 0..1 from top)
+const SHOW = { petals: true, butterflies: true, lanterns: true, sound: true, fireflies: true };
+const NEAR = 1.6, FAR = 6.0, WALK_LIMIT = 1.5, MOVE_SPEED = 1.2, TURN_SPEED = 1.5, SOUND_VOLUME = 0.5;
+const LANTERNS = [[0.350,0.395],[0.404,0.385],[0.4175,0.51],[0.5075,0.45],[0.524,0.565],[0.605,0.45],[0.625,0.41],[0.6775,0.49]];
+// =========================
+
+const CUT = 0.25, HFOV = 75;
+const msg = document.getElementById('msg');
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function loadImage(name) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Could not find file: ' + name)); i.src = name; });
+}
+function canvasTex(draw, w = 128, h = 128) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const glow = canvasTex((g, w) => {
+  const gr = g.createRadialGradient(w/2, w/2, 0, w/2, w/2, w/2);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,240,180,0.6)'); gr.addColorStop(1, 'rgba(255,220,120,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, w, w);
+}, 64, 64);
+
+// ---------- build one 360 world ----------
+function buildWorld(photo, depthImg) {
+  const aspect = photo.naturalWidth / photo.naturalHeight, is360 = aspect > 1.9 && aspect < 2.1;
+  const cols = is360 ? 512 : 320, rows = is360 ? 256 : Math.max(2, Math.min(400, Math.round(320 / aspect)));
+  const c = document.createElement('canvas'); c.width = cols + 1; c.height = rows + 1;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(depthImg, 0, 0, cols + 1, rows + 1);
+  const px = ctx.getImageData(0, 0, cols + 1, rows + 1).data;
+  const depthAt = (ix, iy) => px[(iy * (cols + 1) + ix) * 4] / 255;
+  const t = Math.tan(THREE.MathUtils.degToRad(HFOV / 2));
+  const dirFor = (u, v) => {
+    if (is360) { const lon = (u - 0.5) * Math.PI * 2, lat = (0.5 - v) * Math.PI;
+      return new THREE.Vector3(Math.sin(lon) * Math.cos(lat), Math.sin(lat), -Math.cos(lon) * Math.cos(lat)); }
+    return new THREE.Vector3((u - 0.5) * 2 * t, (0.5 - v) * 2 * t / aspect, -1).normalize();
+  };
+  const radiusFor = d => FAR - d * (FAR - NEAR);
+  const pos = [], uvs = [], idx = [], dv = [], back = [], bidx = [], BACK = FAR * 1.3;
+  for (let iy = 0; iy <= rows; iy++) for (let ix = 0; ix <= cols; ix++) {
+    const u = ix / cols, v = iy / rows, d = depthAt(ix, iy), dir = dirFor(u, v), r = radiusFor(d);
+    pos.push(dir.x * r, dir.y * r + 1.6, dir.z * r); back.push(dir.x * BACK, dir.y * BACK + 1.6, dir.z * BACK);
+    uvs.push(u, 1 - v); dv.push(d);
+  }
+  for (let iy = 0; iy < rows; iy++) for (let ix = 0; ix < cols; ix++) {
+    const a = iy * (cols + 1) + ix, b = a + 1, c2 = a + cols + 1, d2 = c2 + 1;
+    bidx.push(a, c2, b, b, c2, d2);
+    if (Math.max(dv[a], dv[b], dv[c2], dv[d2]) - Math.min(dv[a], dv[b], dv[c2], dv[d2]) > CUT) continue;
+    idx.push(a, c2, b, b, c2, d2);
+  }
+  const tex = new THREE.Texture(photo); tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+  const mk = (p, i) => { const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2)); g.setIndex(i);
+    return new THREE.Mesh(g, mat); };
+  const group = new THREE.Group(); group.add(mk(pos, idx), mk(back, bidx));
+  const pointAt = (u, v, scale = 0.95) => {
+    const ix = Math.round(u * cols), iy = Math.round(v * rows);
+    const p = dirFor(ix / cols, iy / rows).multiplyScalar(radiusFor(depthAt(ix, iy)) * scale); p.y += 1.6; return p;
+  };
+  return { group, pointAt, is360 };
+}
+
+// ---------- portal ----------
+function makePortal(label) {
+  const g = new THREE.Group();
+  const swirl = canvasTex((c, w) => {
+    const gr = c.createRadialGradient(w/2, w/2, 0, w/2, w/2, w/2);
+    gr.addColorStop(0, 'rgba(255,255,255,0.95)'); gr.addColorStop(0.4, 'rgba(140,220,255,0.75)'); gr.addColorStop(1, 'rgba(120,90,255,0.15)');
+    c.fillStyle = gr; c.fillRect(0, 0, w, w);
+    c.strokeStyle = 'rgba(255,255,255,0.6)'; c.lineWidth = 4;
+    for (let i = 0; i < 4; i++) { c.beginPath(); for (let a = 0; a < 12; a += 0.1) { const r = a * 5; c.lineTo(w/2 + Math.cos(a + i * 1.57) * r, w/2 + Math.sin(a + i * 1.57) * r); } c.stroke(); }
+  }, 256, 256);
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(0.45, 48), new THREE.MeshBasicMaterial({ map: swirl, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+  disc.scale.y = 1.7;
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.035, 12, 64), new THREE.MeshBasicMaterial({ color: 0xaee8ff }));
+  rim.scale.y = 1.7;
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: 0x9fdcff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+  halo.scale.set(1.6, 2.2, 1);
+  const txt = new THREE.Sprite(new THREE.SpriteMaterial({ map: canvasTex((c, w, h) => {
+    c.font = 'bold 56px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineWidth = 10; c.strokeStyle = 'rgba(0,0,0,0.7)'; c.strokeText(label, w/2, h/2); c.fillStyle = '#fff'; c.fillText(label, w/2, h/2);
+  }, 512, 128), transparent: true, depthWrite: false }));
+  txt.scale.set(1.0, 0.25, 1); txt.position.y = 1.0;
+  g.add(halo, disc, rim, txt);
+  g.userData = { disc, rim, halo };
+  return g;
+}
+
+try {
+  const imgs = await Promise.all(WORLDS.flatMap(w => [loadImage(w.photo), loadImage(w.depth)]));
+  const scene = new THREE.Scene(); scene.background = new THREE.Color(0x87b8e8);
+
+  WORLDS.forEach((w, i) => {
+    w.built = buildWorld(imgs[i * 2], imgs[i * 2 + 1]);
+    w.built.group.visible = false; scene.add(w.built.group);
+    const p = w.built.pointAt(w.portal[0], w.portal[1], 0.85);
+    const flat = Math.hypot(p.x, p.z), maxD = 4, minD = 2;
+    const k = Math.min(maxD, Math.max(minD, flat)) / flat; p.x *= k; p.z *= k;
+    p.y = Math.min(1.5, Math.max(1.0, p.y));
+    w.portalObj = makePortal(w.label); w.portalObj.position.copy(p); w.portalObj.lookAt(0, p.y, 0);
+    w.built.group.add(w.portalObj);
+  });
+
+  const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 100);
+  camera.position.set(0, 1.6, 0); camera.rotation.order = 'YXZ';
+  const rig = new THREE.Group(); rig.add(camera); scene.add(rig);
+
+  // fade (comfort when switching)
+  const fade = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 8), new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide, transparent: true, opacity: 0, depthTest: false }));
+  fade.renderOrder = 999; camera.add(fade);
+
+  // ---- garden extras ----
+  const outsideFx = new THREE.Group(); scene.add(outsideFx);
+  let petals = null; const petalData = [];
+  if (SHOW.petals) {
+    const N = 120;
+    petals = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.045, 0.032), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }), N);
+    const pc = [0xff8fa8, 0xff6b6b, 0xffffff, 0xffc2d1];
+    for (let i = 0; i < N; i++) { petalData.push({ x: rand(-3, 3), y: rand(0, 3.5), z: rand(-3, 3), s: rand(0.15, 0.35), ph: rand(0, 6.28), rx: rand(0, 6.28), ry: rand(0, 6.28) }); petals.setColorAt(i, new THREE.Color(pc[i % 4])); }
+    outsideFx.add(petals);
+  }
+  const butterflies = [];
+  if (SHOW.butterflies) {
+    const bc = [0xffa53b, 0xffe14d, 0x7ec8ff, 0xff7bd0, 0xffffff, 0xb48cff];
+    for (let i = 0; i < 6; i++) {
+      const m = new THREE.MeshBasicMaterial({ color: bc[i], side: THREE.DoubleSide });
+      const wg = new THREE.PlaneGeometry(0.07, 0.06); wg.rotateX(-Math.PI / 2);
+      const rg = wg.clone(); rg.translate(0.035, 0, 0); const lg = wg.clone(); lg.translate(-0.035, 0, 0);
+      const right = new THREE.Mesh(rg, m), left = new THREE.Mesh(lg, m), holder = new THREE.Group(); holder.add(right, left);
+      outsideFx.add(holder);
+      const a = rand(0, 6.28), d = rand(1.6, 3);
+      butterflies.push({ holder, right, left, cx: Math.cos(a) * d, cz: Math.sin(a) * d, cy: rand(0.9, 1.9), a: rand(0.5, 1.1), sp: rand(0.25, 0.5), ph: rand(0, 6.28) });
+    }
+  }
+  const lanternGlows = [];
+  if (SHOW.lanterns && WORLDS[0].built.is360) {
+    LANTERNS.forEach(([u, v], i) => {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: 0xffd98a, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+      const p = WORLDS[0].built.pointAt(u, v); s.position.copy(p); s.scale.setScalar(0.7);
+      outsideFx.add(s); lanternGlows.push({ s, base: p.clone(), ph: i * 1.7 });
+    });
+  }
+  let fireflies = null; const ffBase = [];
+  if (SHOW.fireflies) {
+    const N = 60;
+    for (let i = 0; i < N; i++) { const a = rand(0, 6.28), d = rand(0.8, 3.2); ffBase.push([Math.cos(a) * d, rand(2.0, 3.8), Math.sin(a) * d, rand(0, 6.28)]); }
+    const fg = new THREE.BufferGeometry(); fg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+    fireflies = new THREE.Points(fg, new THREE.PointsMaterial({ map: glow, color: 0xfff3a0, size: 0.09, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false }));
+    outsideFx.add(fireflies);
+  }
+
+  const ring = new THREE.Mesh(new THREE.RingGeometry(WALK_LIMIT - 0.03, WALK_LIMIT, 64).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthTest: false }));
+  ring.position.y = 0.03; ring.renderOrder = 10; scene.add(ring);
+
+  // ---- sound ----
+  let audio = null, master = null, windGain = null;
+  function startAudio() {
+    if (!SHOW.sound) return;
+    if (audio) { audio.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    audio = new AC(); master = audio.createGain(); master.gain.value = SOUND_VOLUME; master.connect(audio.destination);
+    const len = audio.sampleRate * 3, buf = audio.createBuffer(1, len, audio.sampleRate), data = buf.getChannelData(0);
+    let last = 0; for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; data[i] = last * 3.5; }
+    const noise = audio.createBufferSource(); noise.buffer = buf; noise.loop = true;
+    const lp = audio.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500;
+    windGain = audio.createGain(); windGain.gain.value = current.outside ? 0.12 : 0.02;
+    noise.connect(lp).connect(windGain).connect(master); noise.start();
+    setInterval(() => { windGain.gain.setTargetAtTime(current.outside ? rand(0.05, 0.18) : 0.02, audio.currentTime, 1.5); }, 3000);
+    const chirp = () => {
+      const notes = 2 + Math.floor(Math.random() * 4), base = rand(2200, 3600), vol = current.outside ? 0.05 : 0.012;
+      let tt = audio.currentTime + 0.05;
+      for (let n = 0; n < notes; n++) {
+        const o = audio.createOscillator(), g = audio.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(base, tt); o.frequency.exponentialRampToValueAtTime(base * rand(1.2, 1.6), tt + 0.08);
+        g.gain.setValueAtTime(0, tt); g.gain.linearRampToValueAtTime(vol, tt + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, tt + 0.1);
+        o.connect(g).connect(master); o.start(tt); o.stop(tt + 0.12); tt += rand(0.1, 0.18);
+      }
+      setTimeout(chirp, rand(1800, 6000));
+    };
+    setTimeout(chirp, 1000);
+  }
+  // portal "whoosh"
+  function whoosh() {
+    if (!audio) return;
+    const o = audio.createOscillator(), g = audio.createGain(); o.type = 'sine';
+    o.frequency.setValueAtTime(200, audio.currentTime); o.frequency.exponentialRampToValueAtTime(900, audio.currentTime + 0.5);
+    g.gain.setValueAtTime(0.0001, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.15, audio.currentTime + 0.1); g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.6);
+    o.connect(g).connect(master); o.start(); o.stop(audio.currentTime + 0.7);
+  }
+
+  // ---- switching worlds ----
+  let currentIndex = 0, current = WORLDS[0], switching = false;
+  function show(i) {
+    WORLDS.forEach((w, j) => w.built.group.visible = j === i);
+    currentIndex = i; current = WORLDS[i];
+    outsideFx.visible = current.outside;
+    rig.position.set(0, 0, 0);
+  }
+  show(0);
+  function goThroughPortal() {
+    if (switching) return; switching = true; whoosh();
+    const start = performance.now();
+    const step = () => {
+      const k = (performance.now() - start) / 400;
+      if (k < 1) { fade.material.opacity = k; requestAnimationFrame(step); return; }
+      fade.material.opacity = 1; show((currentIndex + 1) % WORLDS.length);
+      const s2 = performance.now();
+      const back = () => { const k2 = (performance.now() - s2) / 400; fade.material.opacity = Math.max(0, 1 - k2); if (k2 < 1) requestAnimationFrame(back); else switching = false; };
+      back();
+    };
+    step();
+  }
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local-floor');
+  renderer.xr.addEventListener('sessionstart', startAudio);
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+  addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+  // ---- pointing: controllers (VR) ----
+  const raycaster = new THREE.Raycaster(), tmpM = new THREE.Matrix4();
+  const controllers = [0, 1].map(i => {
+    const c = renderer.xr.getController(i);
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]), new THREE.LineBasicMaterial({ color: 0xffffff }));
+    line.scale.z = 5; c.add(line); c.userData.line = line;
+    c.addEventListener('select', () => { if (aim(c)) goThroughPortal(); });
+    rig.add(c); return c;
+  });
+  function aim(c) {
+    tmpM.identity().extractRotation(c.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tmpM);
+    return raycaster.intersectObject(current.portalObj.userData.disc)[0];
+  }
+
+  // ---- PC: mouse look, click portal, W A S D ----
+  let downX = 0, downY = 0;
+  renderer.domElement.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; startAudio(); });
+  renderer.domElement.addEventListener('pointermove', e => {
+    if (e.buttons && !renderer.xr.isPresenting) {
+      camera.rotation.y -= e.movementX * 0.005;
+      camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - e.movementY * 0.005));
+    }
+  });
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
+    raycaster.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+    if (raycaster.intersectObject(current.portalObj.userData.disc)[0]) goThroughPortal();
+  });
+  const keys = {};
+  addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+  addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+  const clock = new THREE.Clock(), dummy = new THREE.Object3D();
+  const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), head = new THREE.Vector3(), look = new THREE.Vector3();
+
+  renderer.setAnimationLoop(() => {
+    const dt = Math.min(clock.getDelta(), 0.1), time = clock.elapsedTime;
+    const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+
+    let mx = 0, my = 0;
+    const session = renderer.xr.getSession();
+    if (session) {
+      for (const src of session.inputSources) {
+        const gp = src.gamepad; if (!gp) continue;
+        const x = gp.axes[2] || 0, y = gp.axes[3] || 0;
+        if (src.handedness === 'left' && (Math.abs(x) > 0.15 || Math.abs(y) > 0.15)) { mx = x; my = y; }
+        else if (src.handedness === 'right' && Math.abs(x) > 0.15) rig.rotation.y -= x * TURN_SPEED * dt;
+      }
+    } else { if (keys.w) my = -1; if (keys.s) my = 1; if (keys.a) mx = -1; if (keys.d) mx = 1; }
+    if (mx || my) {
+      cam.getWorldDirection(fwd); fwd.y = 0; fwd.normalize(); right.crossVectors(fwd, up);
+      rig.position.addScaledVector(fwd, -my * MOVE_SPEED * dt); rig.position.addScaledVector(right, mx * MOVE_SPEED * dt);
+    }
+    cam.getWorldPosition(head);
+    const dist = Math.hypot(head.x, head.z);
+    if (dist > WALK_LIMIT) { const k = 1 - WALK_LIMIT / dist; rig.position.x -= head.x * k; rig.position.z -= head.z * k; }
+    ring.material.opacity = Math.max(0, Math.min(1, (dist - 1.0) / 0.5)) * 0.6;
+
+    // portal animation + hover
+    const pu = current.portalObj.userData;
+    pu.disc.rotation.z += dt * 0.8;
+    let hover = false;
+    if (renderer.xr.isPresenting) controllers.forEach(c => { const h = aim(c); c.userData.line.scale.z = h ? h.distance : 5; if (h) hover = true; });
+    const s = (hover ? 1.15 : 1) + Math.sin(time * 2) * 0.03;
+    pu.disc.scale.set(s, 1.7 * s, 1); pu.rim.scale.set(s, 1.7 * s, 1);
+    pu.halo.material.opacity = hover ? 1 : 0.6 + 0.2 * Math.sin(time * 3);
+    pu.rim.material.color.setHex(hover ? 0xffffff : 0xaee8ff);
+
+    if (current.outside) {
+      if (petals) {
+        petalData.forEach((p, i) => {
+          p.y -= p.s * dt; p.x += Math.sin(time * 1.3 + p.ph) * 0.15 * dt; p.z += Math.cos(time * 1.1 + p.ph) * 0.1 * dt; p.rx += dt * 1.5; p.ry += dt;
+          if (p.y < 0) { p.y = 3.5; p.x = rand(-3, 3); p.z = rand(-3, 3); }
+          dummy.position.set(p.x, p.y, p.z); dummy.rotation.set(p.rx, p.ry, 0); dummy.updateMatrix(); petals.setMatrixAt(i, dummy.matrix);
+        });
+        petals.instanceMatrix.needsUpdate = true;
+      }
+      butterflies.forEach(b => {
+        const tt = time * b.sp + b.ph, x = b.cx + Math.cos(tt) * b.a, z = b.cz + Math.sin(tt * 1.3) * b.a, y = b.cy + Math.sin(tt * 2.1) * 0.25;
+        b.holder.position.set(x, y, z); b.holder.lookAt(b.cx + Math.cos(tt + 0.05) * b.a, y, b.cz + Math.sin((tt + 0.05) * 1.3) * b.a);
+        const f = Math.sin(time * 14 + b.ph) * 0.9; b.right.rotation.z = f; b.left.rotation.z = -f;
+      });
+      lanternGlows.forEach(l => {
+        l.s.position.set(l.base.x + Math.sin(time * 1.1 + l.ph) * 0.04, l.base.y, l.base.z + Math.cos(time * 0.9 + l.ph) * 0.04);
+        l.s.material.opacity = 0.55 + 0.3 * Math.sin(time * 2 + l.ph);
+      });
+      if (fireflies) {
+        const a = fireflies.geometry.attributes.position;
+        ffBase.forEach((f, i) => a.setXYZ(i, f[0] + Math.sin(time * 0.5 + f[3]) * 0.3, f[1] + Math.sin(time * 0.7 + f[3] * 2) * 0.2, f[2] + Math.cos(time * 0.4 + f[3]) * 0.3));
+        a.needsUpdate = true;
+        cam.getWorldDirection(look); fireflies.material.opacity = 0.25 + 0.75 * Math.max(0, Math.min(1, (look.y - 0.2) / 0.5));
+      }
+    }
+    renderer.render(scene, camera);
+  });
+
+  msg.textContent = 'Find the glowing door, point at it and pull the trigger.';
+  setTimeout(() => { msg.style.display = 'none'; }, 7000);
+} catch (err) {
+  msg.textContent = 'Problem: ' + err.message + '. Check that photo.png, depth.png, photo2.png and depth2.png are next to this file.';
+}
+</script>
+</body>
+</html>
